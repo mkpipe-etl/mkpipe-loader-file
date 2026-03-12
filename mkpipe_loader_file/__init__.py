@@ -195,7 +195,7 @@ class FileLoader(BaseLoader, variant='file'):
         bucket(N, col), truncate(N, col), or plain column name.
         """
         import re
-        from pyspark.sql.functions import col, years, months, days, hours, bucket, truncate
+        from pyspark.sql.functions import col, years, months, days, hours
 
         expr = expr.strip()
         # Match function-style: func(args)
@@ -218,15 +218,24 @@ class FileLoader(BaseLoader, variant='file'):
             if func_name in transform_map:
                 return transform_map[func_name](col(args_str))
 
+            # bucket and truncate may not be available in all PySpark versions
             if func_name in ('bucket', 'truncate'):
                 parts = [p.strip() for p in args_str.split(',')]
                 if len(parts) == 2:
                     n = int(parts[0])
                     col_name = parts[1]
-                    if func_name == 'bucket':
-                        return bucket(n, col(col_name))
-                    else:
-                        return truncate(col(col_name), n)
+                    try:
+                        if func_name == 'bucket':
+                            from pyspark.sql.functions import bucket as _bucket
+                            return _bucket(n, col(col_name))
+                        else:
+                            from pyspark.sql.functions import truncate as _truncate
+                            return _truncate(col(col_name), n)
+                    except ImportError:
+                        raise ImportError(
+                            f"PySpark version does not support '{func_name}' partition transform. "
+                            f"Upgrade to PySpark 3.4+ or use a different partition strategy."
+                        )
 
             raise ValueError(f"Unsupported partition transform: {expr}")
 
