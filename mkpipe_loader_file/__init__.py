@@ -11,10 +11,10 @@ JAR_PACKAGES = [
     'org.apache.hadoop:hadoop-aws:3.3.4',
     'com.amazonaws:aws-java-sdk-bundle:1.12.262',
     'com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.22',
-    'org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.7.1',
+    'org.apache.iceberg:iceberg-spark-runtime-3.5_2.13:1.7.1',
     'org.apache.iceberg:iceberg-aws-bundle:1.7.1',
-    'org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.97.1',
-    'io.delta:delta-spark_2.12:3.2.1',
+    'org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.13:0.97.1',
+    'io.delta:delta-spark_2.13:3.2.1',
 ]
 
 logger = get_logger(__name__)
