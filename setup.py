@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='mkpipe-loader-file',
-    version='0.3.2',
+    version='0.3.3',
     license='Apache License 2.0',
     packages=find_packages(),
     install_requires=['mkpipe'],
