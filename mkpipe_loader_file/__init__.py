@@ -156,9 +156,17 @@ class FileLoader(BaseLoader, variant='file'):
             if self.catalog_warehouse:
                 sc.set(f'spark.sql.catalog.{name}.warehouse', self.catalog_warehouse)
 
-        sc.set('spark.sql.extensions',
-               'org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions'
-               ',org.projectnessie.spark.extensions.NessieSparkSessionExtensions')
+        # Note: spark.sql.extensions is a static config and must be set during SparkSession creation
+        # Check if extensions are already configured
+        try:
+            extensions = sc.get('spark.sql.extensions', '')
+            if 'IcebergSparkSessionExtensions' not in extensions:
+                logger.warning({
+                    'message': 'Iceberg extensions not found in spark.sql.extensions',
+                    'hint': 'Add to SparkSession config: spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions'
+                })
+        except Exception:
+            pass
 
     def load(self, table: TableConfig, data: ExtractResult, spark) -> None:
         target_name = table.target_name
