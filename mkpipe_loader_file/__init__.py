@@ -8,9 +8,9 @@ from mkpipe.models import ConnectionConfig, ExtractResult, TableConfig
 from mkpipe.utils import get_logger
 
 JAR_PACKAGES = [
-    'org.apache.hadoop:hadoop-aws:3.3.4',
-    'com.amazonaws:aws-java-sdk-bundle:1.12.262',
-    'com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.22',
+    'org.apache.hadoop:hadoop-aws:3.4.1',
+    'software.amazon.awssdk:bundle:2.29.52',
+    'com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.25',
     'org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.1',
     'org.apache.iceberg:iceberg-aws-bundle:1.10.1',
     'io.delta:delta-spark_2.13:4.0.1',
