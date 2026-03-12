@@ -66,6 +66,12 @@ class FileLoader(BaseLoader, variant='file'):
                 hadoop.set('fs.s3a.secret.key', self.aws_secret_key or '')
             if self.region:
                 hadoop.set('fs.s3a.endpoint.region', self.region)
+            
+            # Set timeout values as milliseconds (not "60s" format)
+            hadoop.set('fs.s3a.connection.timeout', '60000')
+            hadoop.set('fs.s3a.connection.establish.timeout', '60000')
+            hadoop.set('fs.s3a.attempts.maximum', '10')
+            hadoop.set('fs.s3a.retry.limit', '5')
         elif self.storage == 'gcs':
             if self.credentials_file:
                 hadoop.set('google.cloud.auth.service.account.json.keyfile', self.credentials_file)
