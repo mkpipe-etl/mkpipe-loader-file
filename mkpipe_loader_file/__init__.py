@@ -112,9 +112,12 @@ class FileLoader(BaseLoader, variant='file'):
                 sc.set(f'spark.sql.catalog.{name}.warehouse', self.catalog_warehouse)
             if self.region:
                 sc.set(f'spark.sql.catalog.{name}.glue.region', self.region)
+                sc.set(f'spark.sql.catalog.{name}.client.region', self.region)
             if self.aws_access_key:
                 sc.set(f'spark.sql.catalog.{name}.s3.access-key-id', self.aws_access_key)
                 sc.set(f'spark.sql.catalog.{name}.s3.secret-access-key', self.aws_secret_key or '')
+                sc.set(f'spark.sql.catalog.{name}.glue.access-key-id', self.aws_access_key)
+                sc.set(f'spark.sql.catalog.{name}.glue.secret-access-key', self.aws_secret_key or '')
 
         elif self.catalog == 'nessie':
             sc.set(f'spark.sql.catalog.{name}', 'org.apache.iceberg.spark.SparkCatalog')
