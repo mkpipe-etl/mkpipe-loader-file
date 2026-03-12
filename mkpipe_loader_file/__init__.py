@@ -117,8 +117,15 @@ class FileLoader(BaseLoader, variant='file'):
             if self.aws_access_key:
                 sc.set(f'spark.sql.catalog.{name}.s3.access-key-id', self.aws_access_key)
                 sc.set(f'spark.sql.catalog.{name}.s3.secret-access-key', self.aws_secret_key or '')
-                sc.set(f'spark.sql.catalog.{name}.glue.access-key-id', self.aws_access_key)
-                sc.set(f'spark.sql.catalog.{name}.glue.secret-access-key', self.aws_secret_key or '')
+            # AWS SDK v2 DefaultCredentialsProvider uses SystemPropertyCredentialsProvider
+            # which reads from Java system properties. Set them so Glue client can authenticate.
+            jvm = spark.sparkContext._jvm
+            sys_props = jvm.java.lang.System
+            if self.aws_access_key:
+                sys_props.setProperty('aws.accessKeyId', self.aws_access_key)
+                sys_props.setProperty('aws.secretAccessKey', self.aws_secret_key or '')
+            if self.region:
+                sys_props.setProperty('aws.region', self.region)
 
         elif self.catalog == 'nessie':
             sc.set(f'spark.sql.catalog.{name}', 'org.apache.iceberg.spark.SparkCatalog')
