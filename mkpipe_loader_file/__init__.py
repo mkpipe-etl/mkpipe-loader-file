@@ -195,7 +195,13 @@ class FileLoader(BaseLoader, variant='file'):
         bucket(N, col), truncate(N, col), or plain column name.
         """
         import re
-        from pyspark.sql.functions import col, years, months, days, hours
+        from pyspark.sql.functions import col
+
+        # Spark 4.x moved partition transforms to pyspark.sql.functions.partitioning
+        try:
+            from pyspark.sql.functions.partitioning import years, months, days, hours
+        except ImportError:
+            from pyspark.sql.functions import years, months, days, hours
 
         expr = expr.strip()
         # Match function-style: func(args)
@@ -343,16 +349,24 @@ class FileLoader(BaseLoader, variant='file'):
         if new_columns:
             for col_name in new_columns:
                 field = incoming_map[col_name]
-                spark.sql(
-                    f"ALTER TABLE {full_table} ADD COLUMNS "
-                    f"({field.name} {field.dataType.simpleString()})"
-                )
-                logger.info({
-                    'table': full_table,
-                    'schema_evolution': 'add_column',
-                    'column': field.name,
-                    'type': field.dataType.simpleString(),
-                })
+                try:
+                    spark.sql(
+                        f"ALTER TABLE {full_table} ADD COLUMNS "
+                        f"({field.name} {field.dataType.simpleString()})"
+                    )
+                    logger.info({
+                        'table': full_table,
+                        'schema_evolution': 'add_column',
+                        'column': field.name,
+                        'type': field.dataType.simpleString(),
+                    })
+                except Exception:
+                    logger.warning({
+                        'table': full_table,
+                        'schema_evolution': 'add_column_skipped',
+                        'column': field.name,
+                        'reason': 'ALTER TABLE failed, Iceberg SQL extensions may be incompatible',
+                    })
 
         # Widen types where safe
         for col_name, (old_type, new_type) in type_changes.items():
@@ -433,11 +447,19 @@ class FileLoader(BaseLoader, variant='file'):
     def _apply_iceberg_sort_order(self, spark, full_table: str, sort_by: list[str]) -> None:
         """Set write sort order on an Iceberg table via ALTER TABLE."""
         sort_spec = ', '.join(s.strip() for s in sort_by)
-        spark.sql(f"ALTER TABLE {full_table} WRITE ORDERED BY {sort_spec}")
-        logger.info({
-            'table': full_table,
-            'iceberg_sort_order': sort_spec,
-        })
+        try:
+            spark.sql(f"ALTER TABLE {full_table} WRITE ORDERED BY {sort_spec}")
+            logger.info({
+                'table': full_table,
+                'iceberg_sort_order': sort_spec,
+            })
+        except Exception as e:
+            logger.warning({
+                'table': full_table,
+                'iceberg_sort_order_skipped': sort_spec,
+                'reason': str(e)[:200],
+                'hint': 'Iceberg SQL extensions may be incompatible with your Spark version',
+            })
 
     def _write_iceberg(self, spark, df, full_table: str, write_mode: str, table: TableConfig) -> None:
         """Write DataFrame to an Iceberg table with partition, properties, sort order, and schema evolution."""
