@@ -187,13 +187,64 @@ class FileLoader(BaseLoader, variant='file'):
         except Exception:
             pass
 
-    def _iceberg_table_exists(self, spark, full_table: str) -> bool:
+    @staticmethod
+    def _parse_partition_transform(expr: str):
+        """Convert a partition spec string into a Spark Column for Iceberg partitionedBy().
+
+        Supported transforms: years(col), months(col), days(col), hours(col),
+        bucket(N, col), truncate(N, col), or plain column name.
+        """
+        import re
+        from pyspark.sql.functions import col, years, months, days, hours, bucket, truncate
+
+        expr = expr.strip()
+        # Match function-style: func(args)
+        m = re.match(r'^(\w+)\((.+)\)$', expr)
+        if m:
+            func_name = m.group(1).lower()
+            args_str = m.group(2).strip()
+
+            transform_map = {
+                'year': years,
+                'years': years,
+                'month': months,
+                'months': months,
+                'day': days,
+                'days': days,
+                'hour': hours,
+                'hours': hours,
+            }
+
+            if func_name in transform_map:
+                return transform_map[func_name](col(args_str))
+
+            if func_name in ('bucket', 'truncate'):
+                parts = [p.strip() for p in args_str.split(',')]
+                if len(parts) == 2:
+                    n = int(parts[0])
+                    col_name = parts[1]
+                    if func_name == 'bucket':
+                        return bucket(n, col(col_name))
+                    else:
+                        return truncate(col(col_name), n)
+
+            raise ValueError(f"Unsupported partition transform: {expr}")
+
+        # Plain column name
+        return col(expr)
+
+    @staticmethod
+    def _iceberg_table_exists(spark, full_table: str) -> bool:
         """Check if an Iceberg table already exists in the catalog."""
+        log_level = spark.sparkContext.getConf().get('spark.log.level', 'WARN')
         try:
-            spark.sql(f"DESCRIBE TABLE {full_table}")
+            spark.sparkContext.setLogLevel('OFF')
+            spark.table(full_table).schema
             return True
         except Exception:
             return False
+        finally:
+            spark.sparkContext.setLogLevel(log_level)
 
     # Iceberg-supported type promotions (safe widening)
     _TYPE_PROMOTIONS = {
@@ -425,7 +476,8 @@ class FileLoader(BaseLoader, variant='file'):
             writer = df.writeTo(full_table).using('iceberg')
 
             if partition_by:
-                writer = writer.partitionedBy(*[s.strip() for s in partition_by])
+                partition_cols = [self._parse_partition_transform(p) for p in partition_by]
+                writer = writer.partitionedBy(*partition_cols)
 
             for key, value in properties.items():
                 writer = writer.tableProperty(key, value)
