@@ -81,8 +81,6 @@ class FileLoader(BaseLoader, variant='file'):
         sc = spark.conf
         name = self.catalog_name
 
-        sc.set('spark.sql.extensions',
-               'io.delta.sql.DeltaSparkSessionExtension')
         sc.set('spark.sql.catalog.spark_catalog',
                'org.apache.spark.sql.delta.catalog.DeltaCatalog')
 
@@ -99,6 +97,17 @@ class FileLoader(BaseLoader, variant='file'):
             sc.set(f'spark.sql.catalog.{name}', 'org.apache.spark.sql.delta.catalog.DeltaCatalog')
             if self.catalog_uri:
                 sc.set('spark.hadoop.hive.metastore.uris', self.catalog_uri)
+
+        # Note: spark.sql.extensions is a static config and must be set during SparkSession creation
+        try:
+            extensions = sc.get('spark.sql.extensions', '')
+            if 'DeltaSparkSessionExtension' not in extensions:
+                logger.warning({
+                    'message': 'Delta extensions not found in spark.sql.extensions',
+                    'hint': 'Add to SparkSession config: spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension'
+                })
+        except Exception:
+            pass
 
     def _configure_catalog(self, spark):
         """Register the Iceberg catalog in the active Spark session."""
@@ -178,6 +187,349 @@ class FileLoader(BaseLoader, variant='file'):
         except Exception:
             pass
 
+    def _iceberg_table_exists(self, spark, full_table: str) -> bool:
+        """Check if an Iceberg table already exists in the catalog."""
+        try:
+            spark.sql(f"DESCRIBE TABLE {full_table}")
+            return True
+        except Exception:
+            return False
+
+    # Iceberg-supported type promotions (safe widening)
+    _TYPE_PROMOTIONS = {
+        ('int', 'bigint'),
+        ('float', 'double'),
+        ('decimal(10,0)', 'decimal(20,0)'),  # example; checked via startswith below
+    }
+
+    _PROTECTED_COLUMNS = {'etl_time', 'mkpipe_id'}
+
+    @staticmethod
+    def _is_safe_promotion(old_type: str, new_type: str) -> bool:
+        """Check if type change is a safe Iceberg promotion."""
+        old_t = old_type.lower().strip()
+        new_t = new_type.lower().strip()
+        if old_t == new_t:
+            return True
+        # int -> bigint
+        if old_t == 'int' and new_t == 'bigint':
+            return True
+        # float -> double
+        if old_t == 'float' and new_t == 'double':
+            return True
+        # decimal widening (higher precision/scale)
+        if old_t.startswith('decimal') and new_t.startswith('decimal'):
+            return True
+        # string accepts anything
+        if new_t == 'string':
+            return True
+        return False
+
+    def _evolve_iceberg_schema(self, spark, full_table: str, df, mode: str,
+                                protected_extra: set[str] | None = None) -> None:
+        """Handle schema evolution for an existing Iceberg table.
+
+        Modes:
+            merge   – add new columns, widen compatible types, drop removed columns
+            replace – skip evolution, table will be recreated
+            strict  – raise error on any schema mismatch
+        """
+        if mode == 'replace':
+            return
+
+        existing = spark.table(full_table).schema
+        incoming = df.schema
+
+        existing_map = {f.name.lower(): f for f in existing.fields}
+        incoming_map = {f.name.lower(): f for f in incoming.fields}
+
+        existing_names = set(existing_map.keys())
+        incoming_names = set(incoming_map.keys())
+
+        new_columns = incoming_names - existing_names
+        dropped_columns = existing_names - incoming_names
+
+        # Build protected set: metadata + partition + sort columns
+        protected = {c.lower() for c in self._PROTECTED_COLUMNS}
+        if protected_extra:
+            protected |= {c.lower() for c in protected_extra}
+
+        # Remove protected columns from drop candidates
+        droppable = dropped_columns - protected
+
+        # Check type changes on common columns
+        type_changes = {}
+        for col_name in existing_names & incoming_names:
+            old_type = existing_map[col_name].dataType.simpleString()
+            new_type = incoming_map[col_name].dataType.simpleString()
+            if old_type != new_type:
+                type_changes[col_name] = (old_type, new_type)
+
+        if mode == 'strict':
+            issues = []
+            if new_columns:
+                issues.append(f"new columns: {new_columns}")
+            if droppable:
+                issues.append(f"dropped columns: {droppable}")
+            if type_changes:
+                issues.append(f"type changes: {type_changes}")
+            if issues:
+                raise ConfigError(
+                    f"Schema mismatch on '{full_table}': {'; '.join(issues)}. "
+                    f"Set iceberg_schema_evolution='merge' to auto-evolve."
+                )
+
+        # Add new columns
+        if new_columns:
+            for col_name in new_columns:
+                field = incoming_map[col_name]
+                spark.sql(
+                    f"ALTER TABLE {full_table} ADD COLUMNS "
+                    f"({field.name} {field.dataType.simpleString()})"
+                )
+                logger.info({
+                    'table': full_table,
+                    'schema_evolution': 'add_column',
+                    'column': field.name,
+                    'type': field.dataType.simpleString(),
+                })
+
+        # Widen types where safe
+        for col_name, (old_type, new_type) in type_changes.items():
+            if self._is_safe_promotion(old_type, new_type):
+                try:
+                    spark.sql(
+                        f"ALTER TABLE {full_table} ALTER COLUMN "
+                        f"{col_name} TYPE {new_type}"
+                    )
+                    logger.info({
+                        'table': full_table,
+                        'schema_evolution': 'type_widen',
+                        'column': col_name,
+                        'old_type': old_type,
+                        'new_type': new_type,
+                    })
+                except Exception:
+                    logger.warning({
+                        'table': full_table,
+                        'schema_evolution': 'type_widen_skipped',
+                        'column': col_name,
+                        'old_type': old_type,
+                        'new_type': new_type,
+                        'reason': 'type change not supported by catalog',
+                    })
+            else:
+                logger.warning({
+                    'table': full_table,
+                    'schema_evolution': 'type_change_incompatible',
+                    'column': col_name,
+                    'old_type': old_type,
+                    'new_type': new_type,
+                    'reason': 'not a safe promotion, column cast may be needed',
+                })
+
+        # Drop removed columns (only non-protected)
+        if droppable and mode == 'merge':
+            for col_name in droppable:
+                try:
+                    spark.sql(f"ALTER TABLE {full_table} DROP COLUMN {col_name}")
+                    logger.info({
+                        'table': full_table,
+                        'schema_evolution': 'drop_column',
+                        'column': col_name,
+                    })
+                except Exception:
+                    logger.warning({
+                        'table': full_table,
+                        'schema_evolution': 'drop_column_skipped',
+                        'column': col_name,
+                        'reason': 'column drop not supported or failed',
+                    })
+
+    @staticmethod
+    def _align_df_to_table(spark, df, full_table: str):
+        """Align DataFrame columns to match the existing Iceberg table schema.
+
+        - Reorder columns to match table order
+        - Add missing columns as NULL (columns that exist in table but not in df)
+        - Drop extra columns not in table schema
+        This ensures append never fails due to column order/count mismatch.
+        """
+        from pyspark.sql.functions import lit
+        table_schema = spark.table(full_table).schema
+        table_col_names = [f.name.lower() for f in table_schema.fields]
+        df_col_names = {f.name.lower(): f.name for f in df.schema.fields}
+
+        select_cols = []
+        for tf in table_schema.fields:
+            col_lower = tf.name.lower()
+            if col_lower in df_col_names:
+                select_cols.append(df[df_col_names[col_lower]].cast(tf.dataType).alias(tf.name))
+            else:
+                select_cols.append(lit(None).cast(tf.dataType).alias(tf.name))
+
+        return df.select(*select_cols)
+
+    def _apply_iceberg_sort_order(self, spark, full_table: str, sort_by: list[str]) -> None:
+        """Set write sort order on an Iceberg table via ALTER TABLE."""
+        sort_spec = ', '.join(s.strip() for s in sort_by)
+        spark.sql(f"ALTER TABLE {full_table} WRITE ORDERED BY {sort_spec}")
+        logger.info({
+            'table': full_table,
+            'iceberg_sort_order': sort_spec,
+        })
+
+    def _write_iceberg(self, spark, df, full_table: str, write_mode: str, table: TableConfig) -> None:
+        """Write DataFrame to an Iceberg table with partition, properties, sort order, and schema evolution."""
+        partition_by = table.iceberg_partition_by
+        sort_by = table.iceberg_sort_by
+        properties = table.iceberg_properties
+        schema_evolution = table.iceberg_schema_evolution
+        table_exists = self._iceberg_table_exists(spark, full_table)
+
+        # Collect protected column names (partition + sort) so they won't be dropped
+        protected_extra: set[str] = set()
+        if partition_by:
+            for spec in partition_by:
+                # Extract column name from transform: "day(order_date)" -> "order_date"
+                s = spec.strip()
+                if '(' in s and s.endswith(')'):
+                    col_part = s[s.index('(') + 1 : -1]
+                    # Handle bucket(16, id) -> id
+                    parts = [p.strip() for p in col_part.split(',')]
+                    protected_extra.add(parts[-1].lower())
+                else:
+                    protected_extra.add(s.lower())
+        if sort_by:
+            for s in sort_by:
+                protected_extra.add(s.strip().lower())
+
+        if table_exists and schema_evolution != 'replace':
+            self._evolve_iceberg_schema(spark, full_table, df, schema_evolution,
+                                         protected_extra=protected_extra)
+
+            if sort_by:
+                self._apply_iceberg_sort_order(spark, full_table, sort_by)
+
+            # Align DataFrame columns to table schema (order, types, missing cols as NULL)
+            df = self._align_df_to_table(spark, df, full_table)
+
+            if write_mode == 'overwrite':
+                if partition_by:
+                    df.writeTo(full_table).overwritePartitions()
+                else:
+                    df.writeTo(full_table).using('iceberg').createOrReplace()
+            else:
+                df.writeTo(full_table).append()
+        else:
+            writer = df.writeTo(full_table).using('iceberg')
+
+            if partition_by:
+                writer = writer.partitionedBy(*[s.strip() for s in partition_by])
+
+            for key, value in properties.items():
+                writer = writer.tableProperty(key, value)
+
+            if write_mode == 'overwrite':
+                writer.createOrReplace()
+            else:
+                writer.create()
+
+            if sort_by:
+                self._apply_iceberg_sort_order(spark, full_table, sort_by)
+
+    def _delta_table_exists(self, spark, full_table: str | None, path: str | None) -> bool:
+        """Check if a Delta table already exists."""
+        try:
+            if full_table:
+                spark.sql(f"DESCRIBE TABLE {full_table}")
+            elif path:
+                spark.read.format('delta').load(path).limit(0)
+            else:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _write_delta(self, spark, df, target_name: str, path: str,
+                     write_mode: str, table: TableConfig) -> None:
+        """Write DataFrame to a Delta table with partition, z-order, properties, and schema evolution."""
+        partition_by = table.delta_partition_by
+        z_order_by = table.delta_z_order_by
+        properties = table.delta_properties
+        schema_evolution = table.delta_schema_evolution
+
+        full_table = f'{self.catalog_name}.{target_name}' if self.catalog else None
+        table_exists = self._delta_table_exists(spark, full_table, path)
+
+        if table_exists and schema_evolution != 'replace':
+            # Schema evolution for existing table
+            if schema_evolution == 'merge':
+                merge_opts = {'mergeSchema': 'true'}
+            elif schema_evolution == 'strict':
+                merge_opts = {}
+            else:
+                merge_opts = {}
+
+            if full_table:
+                # Align DataFrame to existing table schema
+                df = self._align_df_to_table(spark, df, full_table)
+                writer = df.writeTo(full_table)
+                if write_mode == 'overwrite':
+                    writer.using('delta').createOrReplace()
+                else:
+                    writer.append()
+            else:
+                writer = df.write.format('delta').mode(write_mode)
+                for k, v in merge_opts.items():
+                    writer = writer.option(k, v)
+                if partition_by:
+                    writer = writer.partitionBy(*partition_by)
+                writer.save(path)
+        else:
+            # Create new table
+            if full_table:
+                writer = df.writeTo(full_table).using('delta')
+                if partition_by:
+                    writer = writer.partitionedBy(*partition_by)
+                for key, value in properties.items():
+                    writer = writer.tableProperty(key, value)
+                if write_mode == 'overwrite':
+                    writer.createOrReplace()
+                else:
+                    writer.create()
+            else:
+                writer = df.write.format('delta').mode(write_mode)
+                if schema_evolution == 'merge':
+                    writer = writer.option('mergeSchema', 'true')
+                if partition_by:
+                    writer = writer.partitionBy(*partition_by)
+                writer.save(path)
+
+        # Set table properties via ALTER TABLE (catalog-based only)
+        if full_table and properties and table_exists:
+            for key, value in properties.items():
+                try:
+                    spark.sql(f"ALTER TABLE {full_table} SET TBLPROPERTIES ('{key}' = '{value}')")
+                except Exception:
+                    pass
+
+        # Z-Order optimization (runs after write, catalog-based only)
+        if z_order_by and full_table:
+            z_cols = ', '.join(z_order_by)
+            try:
+                spark.sql(f"OPTIMIZE {full_table} ZORDER BY ({z_cols})")
+                logger.info({
+                    'table': full_table or path,
+                    'delta_z_order': z_cols,
+                })
+            except Exception:
+                logger.warning({
+                    'table': full_table or path,
+                    'delta_z_order_skipped': z_cols,
+                    'reason': 'OPTIMIZE ZORDER requires Delta catalog table',
+                })
+
     def load(self, table: TableConfig, data: ExtractResult, spark) -> None:
         target_name = table.target_name
         write_mode = data.write_mode
@@ -208,20 +560,11 @@ class FileLoader(BaseLoader, variant='file'):
             if self.catalog:
                 self._configure_catalog(spark)
             full_table = f'{self.catalog_name}.{self.catalog_database}.{target_name}'
-            if write_mode == 'overwrite':
-                df.writeTo(full_table).using('iceberg').createOrReplace()
-            else:
-                df.writeTo(full_table).using('iceberg').append()
+            self._write_iceberg(spark, df, full_table, write_mode, table)
         elif self.format == 'delta':
             if self.catalog:
                 self._configure_delta_catalog(spark)
-                full_table = f'{self.catalog_name}.{target_name}'
-                if write_mode == 'overwrite':
-                    df.writeTo(full_table).using('delta').createOrReplace()
-                else:
-                    df.writeTo(full_table).using('delta').append()
-            else:
-                df.write.format('delta').mode(write_mode).save(path)
+            self._write_delta(spark, df, target_name, path, write_mode, table)
         else:
             writer = df.write.format(self.format).mode(write_mode)
             if self.format == 'csv':

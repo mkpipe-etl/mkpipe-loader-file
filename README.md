@@ -51,7 +51,8 @@ connections:
 | `extra.format` | str | `parquet` | File format: `parquet` \| `csv` \| `json` \| `orc` \| `avro` \| `iceberg` \| `delta` |
 | `extra.path` | str | `""` | Base path. Target name appended: `<path>/<target_name>` |
 | `extra.catalog` | str | `null` | Catalog type — **Iceberg**: `glue` \| `nessie` \| `rest` \| `hadoop` · **Delta**: `hms` \| `unity` |
-| `extra.catalog_name` | str | `default` | Spark catalog identifier — table referenced as `<catalog_name>.<db>.<table>` |
+| `extra.catalog_name` | str | `default` | Spark catalog identifier — table referenced as `<catalog_name>.<catalog_database>.<table>` |
+| `extra.catalog_database` | str | `default` | Database/namespace within the catalog (e.g. Glue database name). Table path on S3: `<warehouse>/<catalog_database>.db/<table>/` |
 | `extra.catalog_uri` | str | `null` | Catalog endpoint URI (Nessie: `http://...`, REST: `https://...`, HMS: `thrift://...`) |
 | `extra.catalog_warehouse` | str | `null` | Warehouse root path (S3/GCS/HDFS URI or local path) |
 | `extra.nessie_ref` | str | `main` | Nessie branch or tag to write to |
@@ -75,7 +76,7 @@ For non-catalog formats (`parquet`, `csv`, `json`, `orc`, `avro`, `delta` withou
 2. `storage=s3` and `bucket_name` is set → `s3a://<bucket_name>/<s3_prefix>/<target_name>`
 3. Otherwise → `<target_name>` as-is
 
-For catalog-based formats (`iceberg` or `delta` with `catalog`), the path is ignored — the table is referenced as `<catalog_name>.<target_name>`.
+For catalog-based formats (`iceberg` with `catalog`), the path is ignored — the table is referenced as `<catalog_name>.<catalog_database>.<target_name>`. For `delta` with catalog, it is `<catalog_name>.<target_name>`.
 
 ## Table Parameters
 
@@ -87,6 +88,14 @@ For catalog-based formats (`iceberg` or `delta` with `catalog`), the path is ign
 | `write_partitions` | int | `null` | Coalesce DataFrame to N partitions before writing (`df.coalesce(N)`) |
 | `batchsize` | int | `10000` | Batch size hint (used by some downstream connectors) |
 | `tags` | list | `[]` | Tags for selective pipeline execution (`mkpipe run --tags ...`) |
+| `iceberg_partition_by` | list | `null` | Iceberg partition spec. Supports transforms: `year(col)`, `month(col)`, `day(col)`, `hour(col)`, `bucket(N, col)`, `truncate(N, col)`, or plain column names |
+| `iceberg_sort_by` | list | `null` | Write sort order columns. Improves query performance on filtered/joined columns. Applied via `ALTER TABLE ... WRITE ORDERED BY` |
+| `iceberg_properties` | dict | `{}` | Iceberg table properties (e.g. `write.format.default`, `write.parquet.compression-codec`) |
+| `iceberg_schema_evolution` | str | `merge` | Schema evolution mode: `merge` (add/drop columns), `replace` (recreate table), `strict` (error on mismatch) |
+| `delta_partition_by` | list | `null` | Delta partition columns (plain column names only, no transforms) |
+| `delta_z_order_by` | list | `null` | Z-Order optimization columns. Runs `OPTIMIZE ... ZORDER BY` after write (catalog-based only) |
+| `delta_properties` | dict | `{}` | Delta table properties (e.g. `delta.autoOptimize.optimizeWrite`, `delta.autoOptimize.autoCompact`) |
+| `delta_schema_evolution` | str | `merge` | Schema evolution mode: `merge` (mergeSchema), `replace` (recreate table), `strict` (error on mismatch) |
 
 ### Metadata Columns
 
@@ -165,13 +174,20 @@ connections:
   file_target:
     variant: file
     extra:
+      storage: s3
       format: iceberg
       catalog: glue
       catalog_name: my_glue
+      catalog_database: my_database   # Glue database name (default: "default")
       catalog_warehouse: s3a://my-bucket/warehouse
     aws_access_key: ${AWS_ACCESS_KEY_ID}
     aws_secret_key: ${AWS_SECRET_ACCESS_KEY}
     region: eu-central-1
+
+settings:
+  spark:
+    extra_config:
+      spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
 
 pipelines:
   - name: to_glue
@@ -179,11 +195,69 @@ pipelines:
     destination: file_target
     tables:
       - name: public.orders
-        target_name: my_db.orders    # <glue_database>.<table>
+        target_name: orders
 ```
+
+The table will be registered in Glue as `my_database.orders` and stored at `s3a://my-bucket/warehouse/my_database.db/orders/`.
 
 - `overwrite` mode: uses `writeTo(...).createOrReplace()` — creates the table if it doesn't exist
 - `append` mode: uses `writeTo(...).append()`
+
+> **Important:** `spark.sql.extensions` must be set in `settings.spark.extra_config` — it is a static Spark config and cannot be modified after SparkSession creation.
+
+### Apache Iceberg — Partitioned Table with Properties
+
+```yaml
+pipelines:
+  - name: to_glue
+    source: my_source
+    destination: file_target
+    tables:
+      - name: public.orders
+        target_name: orders
+        iceberg_partition_by:
+          - "day(order_date)"       # daily partition using Iceberg transform
+          - region                  # identity partition on region column
+        iceberg_sort_by:
+          - order_date              # sort within each partition for faster queries
+          - customer_id
+        iceberg_properties:
+          write.format.default: parquet
+          write.parquet.compression-codec: zstd
+          write.metadata.delete-after-commit.enabled: "true"
+          write.metadata.previous-versions-max: "3"
+        iceberg_schema_evolution: merge   # merge | replace | strict
+```
+
+**Supported partition transforms:**
+
+| Transform | Example | Description |
+|-----------|---------|-------------|
+| Identity | `region` | Partition by exact column value |
+| Year | `year(ts)` | Extract year from timestamp/date |
+| Month | `month(ts)` | Extract year-month |
+| Day | `day(ts)` | Extract year-month-day |
+| Hour | `hour(ts)` | Extract year-month-day-hour |
+| Bucket | `bucket(16, id)` | Hash partition into N buckets |
+| Truncate | `truncate(10, name)` | Truncate string/int to width |
+
+**Schema evolution modes:**
+
+| Mode | Behavior |
+|------|----------|
+| `merge` (default) | Add new columns, drop removed columns automatically |
+| `replace` | Drop and recreate the table with the new schema on every overwrite |
+| `strict` | Raise an error if the incoming schema differs from the existing table |
+
+**Common Iceberg table properties:**
+
+| Property | Description |
+|----------|-------------|
+| `write.format.default` | File format: `parquet` (default), `orc`, `avro` |
+| `write.parquet.compression-codec` | Compression: `zstd`, `snappy`, `gzip`, `lz4` |
+| `write.target-file-size-bytes` | Target file size (default: 536870912 = 512MB) |
+| `write.metadata.delete-after-commit.enabled` | Auto-clean old metadata files |
+| `write.metadata.previous-versions-max` | Number of metadata versions to keep |
 
 ### Apache Iceberg — Nessie Catalog
 
@@ -318,6 +392,49 @@ pipelines:
 - `overwrite` mode: uses `writeTo(...).using('delta').createOrReplace()`
 - `append` mode: uses `writeTo(...).using('delta').append()`
 
+> **Important:** `spark.sql.extensions` must be set in `settings.spark.extra_config` — it is a static Spark config and cannot be modified after SparkSession creation.
+
+### Delta Lake — Partitioned Table with Z-Order
+
+```yaml
+pipelines:
+  - name: to_hms_delta
+    source: my_source
+    destination: file_target
+    tables:
+      - name: public.orders
+        target_name: my_db.orders
+        delta_partition_by:
+          - order_date               # plain column names only (no transforms)
+        delta_z_order_by:
+          - customer_id              # OPTIMIZE ... ZORDER BY (catalog-based only)
+          - region
+        delta_properties:
+          delta.autoOptimize.optimizeWrite: "true"
+          delta.autoOptimize.autoCompact: "true"
+          delta.logRetentionDuration: "interval 30 days"
+          delta.deletedFileRetentionDuration: "interval 7 days"
+        delta_schema_evolution: merge   # merge | replace | strict
+```
+
+**Delta vs Iceberg partition differences:**
+
+| Feature | Iceberg | Delta |
+|---------|---------|-------|
+| Partition transforms | `year()`, `month()`, `day()`, `hour()`, `bucket()`, `truncate()` | Plain column names only |
+| Sort optimization | `WRITE ORDERED BY` (built-in) | `OPTIMIZE ... ZORDER BY` (separate command) |
+| Schema evolution | `ALTER TABLE ADD/DROP/ALTER COLUMN` | `mergeSchema` option |
+
+**Common Delta table properties:**
+
+| Property | Description |
+|----------|-------------|
+| `delta.autoOptimize.optimizeWrite` | Auto-optimize file sizes during write |
+| `delta.autoOptimize.autoCompact` | Auto-compact small files after write |
+| `delta.logRetentionDuration` | How long to keep transaction log (default: 30 days) |
+| `delta.deletedFileRetentionDuration` | How long to keep deleted data files (default: 7 days) |
+| `delta.dataSkippingNumIndexedCols` | Number of columns to collect stats for (default: 32) |
+
 ## Write Modes
 
 Write mode is determined automatically by the extractor and passed to the loader:
@@ -357,5 +474,19 @@ tables:
         spark.hadoop.fs.s3a.endpoint: http://minio:9000
         spark.hadoop.fs.s3a.path.style.access: "true"
   ```
-- Iceberg and Delta catalog extensions (`spark.sql.extensions`) are set dynamically at runtime — if your Spark session is pre-created with conflicting config, set them statically in `settings.spark.extra_config` instead
+- **Iceberg requires `spark.sql.extensions`** to be set at SparkSession creation time. Add this to your `settings.spark.extra_config`:
+  ```yaml
+  settings:
+    spark:
+      extra_config:
+        spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+  ```
+  This is a static Spark config and **cannot** be set after the session is created.
+- **Delta Lake also requires `spark.sql.extensions`** for catalog-based usage. Add to `settings.spark.extra_config`:
+  ```yaml
+  settings:
+    spark:
+      extra_config:
+        spark.sql.extensions: "io.delta.sql.DeltaSparkSessionExtension"
+  ```
 - The loader calls `df.unpersist()` and `gc.collect()` after each table write to free memory
