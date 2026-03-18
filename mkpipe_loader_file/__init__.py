@@ -41,13 +41,12 @@ class FileLoader(BaseLoader, variant='file'):
 
         if self.format not in SUPPORTED_FORMATS:
             raise ConfigError(
-                f"Unsupported format: '{self.format}'. "
-                f"Supported: {SUPPORTED_FORMATS}"
+                f"Unsupported format: '{self.format}'. Supported: {SUPPORTED_FORMATS}"
             )
         if self.catalog and self.catalog not in SUPPORTED_CATALOGS:
             raise ConfigError(
                 f"Unsupported catalog: '{self.catalog}'. "
-                f"Supported: {SUPPORTED_CATALOGS}"
+                f'Supported: {SUPPORTED_CATALOGS}'
             )
 
     def _resolve_path(self, table_name: str) -> str:
@@ -66,7 +65,7 @@ class FileLoader(BaseLoader, variant='file'):
                 hadoop.set('fs.s3a.secret.key', self.aws_secret_key or '')
             if self.region:
                 hadoop.set('fs.s3a.endpoint.region', self.region)
-            
+
             # Set timeout values as milliseconds (not "60s" format)
             hadoop.set('fs.s3a.connection.timeout', '60000')
             hadoop.set('fs.s3a.connection.establish.timeout', '60000')
@@ -74,18 +73,26 @@ class FileLoader(BaseLoader, variant='file'):
             hadoop.set('fs.s3a.retry.limit', '5')
         elif self.storage == 'gcs':
             if self.credentials_file:
-                hadoop.set('google.cloud.auth.service.account.json.keyfile', self.credentials_file)
+                hadoop.set(
+                    'google.cloud.auth.service.account.json.keyfile',
+                    self.credentials_file,
+                )
 
     def _configure_delta_catalog(self, spark):
         """Register a Delta catalog (Unity Catalog or Hive Metastore) in the active Spark session."""
         sc = spark.conf
         name = self.catalog_name
 
-        sc.set('spark.sql.catalog.spark_catalog',
-               'org.apache.spark.sql.delta.catalog.DeltaCatalog')
+        sc.set(
+            'spark.sql.catalog.spark_catalog',
+            'org.apache.spark.sql.delta.catalog.DeltaCatalog',
+        )
 
         if self.catalog == 'unity':
-            sc.set(f'spark.sql.catalog.{name}', 'com.databricks.spark.sql.catalog.UnitySessionCatalog')
+            sc.set(
+                f'spark.sql.catalog.{name}',
+                'com.databricks.spark.sql.catalog.UnitySessionCatalog',
+            )
             if self.catalog_uri:
                 sc.set('spark.databricks.unityCatalog.enabled', 'true')
                 sc.set('spark.databricks.unityCatalog.host', self.catalog_uri)
@@ -94,7 +101,10 @@ class FileLoader(BaseLoader, variant='file'):
                 sc.set('spark.databricks.unityCatalog.token', token)
 
         elif self.catalog == 'hms':
-            sc.set(f'spark.sql.catalog.{name}', 'org.apache.spark.sql.delta.catalog.DeltaCatalog')
+            sc.set(
+                f'spark.sql.catalog.{name}',
+                'org.apache.spark.sql.delta.catalog.DeltaCatalog',
+            )
             if self.catalog_uri:
                 sc.set('spark.hadoop.hive.metastore.uris', self.catalog_uri)
 
@@ -102,10 +112,12 @@ class FileLoader(BaseLoader, variant='file'):
         try:
             extensions = sc.get('spark.sql.extensions', '')
             if 'DeltaSparkSessionExtension' not in extensions:
-                logger.warning({
-                    'message': 'Delta extensions not found in spark.sql.extensions',
-                    'hint': 'Add to SparkSession config: spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension'
-                })
+                logger.warning(
+                    {
+                        'message': 'Delta extensions not found in spark.sql.extensions',
+                        'hint': 'Add to SparkSession config: spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension',
+                    }
+                )
         except Exception:
             pass
 
@@ -116,16 +128,27 @@ class FileLoader(BaseLoader, variant='file'):
 
         if self.catalog == 'glue':
             sc.set(f'spark.sql.catalog.{name}', 'org.apache.iceberg.spark.SparkCatalog')
-            sc.set(f'spark.sql.catalog.{name}.catalog-impl', 'org.apache.iceberg.aws.glue.GlueCatalog')
-            sc.set(f'spark.sql.catalog.{name}.io-impl', 'org.apache.iceberg.aws.s3.S3FileIO')
+            sc.set(
+                f'spark.sql.catalog.{name}.catalog-impl',
+                'org.apache.iceberg.aws.glue.GlueCatalog',
+            )
+            sc.set(
+                f'spark.sql.catalog.{name}.io-impl',
+                'org.apache.iceberg.aws.s3.S3FileIO',
+            )
             if self.catalog_warehouse:
                 sc.set(f'spark.sql.catalog.{name}.warehouse', self.catalog_warehouse)
             if self.region:
                 sc.set(f'spark.sql.catalog.{name}.glue.region', self.region)
                 sc.set(f'spark.sql.catalog.{name}.client.region', self.region)
             if self.aws_access_key:
-                sc.set(f'spark.sql.catalog.{name}.s3.access-key-id', self.aws_access_key)
-                sc.set(f'spark.sql.catalog.{name}.s3.secret-access-key', self.aws_secret_key or '')
+                sc.set(
+                    f'spark.sql.catalog.{name}.s3.access-key-id', self.aws_access_key
+                )
+                sc.set(
+                    f'spark.sql.catalog.{name}.s3.secret-access-key',
+                    self.aws_secret_key or '',
+                )
             # AWS SDK v2 DefaultCredentialsProvider uses SystemPropertyCredentialsProvider
             # which reads from Java system properties. Set them so Glue client can authenticate.
             jvm = spark.sparkContext._jvm
@@ -138,8 +161,14 @@ class FileLoader(BaseLoader, variant='file'):
 
         elif self.catalog == 'nessie':
             sc.set(f'spark.sql.catalog.{name}', 'org.apache.iceberg.spark.SparkCatalog')
-            sc.set(f'spark.sql.catalog.{name}.catalog-impl', 'org.apache.iceberg.nessie.NessieCatalog')
-            sc.set(f'spark.sql.catalog.{name}.io-impl', 'org.apache.iceberg.aws.s3.S3FileIO')
+            sc.set(
+                f'spark.sql.catalog.{name}.catalog-impl',
+                'org.apache.iceberg.nessie.NessieCatalog',
+            )
+            sc.set(
+                f'spark.sql.catalog.{name}.io-impl',
+                'org.apache.iceberg.aws.s3.S3FileIO',
+            )
             if self.catalog_uri:
                 sc.set(f'spark.sql.catalog.{name}.uri', self.catalog_uri)
             if self.catalog_warehouse:
@@ -180,10 +209,12 @@ class FileLoader(BaseLoader, variant='file'):
         try:
             extensions = sc.get('spark.sql.extensions', '')
             if 'IcebergSparkSessionExtensions' not in extensions:
-                logger.warning({
-                    'message': 'Iceberg extensions not found in spark.sql.extensions',
-                    'hint': 'Add to SparkSession config: spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions'
-                })
+                logger.warning(
+                    {
+                        'message': 'Iceberg extensions not found in spark.sql.extensions',
+                        'hint': 'Add to SparkSession config: spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions',
+                    }
+                )
         except Exception:
             pass
 
@@ -233,17 +264,19 @@ class FileLoader(BaseLoader, variant='file'):
                     try:
                         if func_name == 'bucket':
                             from pyspark.sql.functions import bucket as _bucket
+
                             return _bucket(n, col(col_name))
                         else:
                             from pyspark.sql.functions import truncate as _truncate
+
                             return _truncate(col(col_name), n)
                     except ImportError:
                         raise ImportError(
                             f"PySpark version does not support '{func_name}' partition transform. "
-                            f"Upgrade to PySpark 3.4+ or use a different partition strategy."
+                            f'Upgrade to PySpark 3.4+ or use a different partition strategy.'
                         )
 
-            raise ValueError(f"Unsupported partition transform: {expr}")
+            raise ValueError(f'Unsupported partition transform: {expr}')
 
         # Plain column name
         return col(expr)
@@ -291,8 +324,14 @@ class FileLoader(BaseLoader, variant='file'):
             return True
         return False
 
-    def _evolve_iceberg_schema(self, spark, full_table: str, df, mode: str,
-                                protected_extra: set[str] | None = None) -> None:
+    def _evolve_iceberg_schema(
+        self,
+        spark,
+        full_table: str,
+        df,
+        mode: str,
+        protected_extra: set[str] | None = None,
+    ) -> None:
         """Handle schema evolution for an existing Iceberg table.
 
         Modes:
@@ -334,11 +373,11 @@ class FileLoader(BaseLoader, variant='file'):
         if mode == 'strict':
             issues = []
             if new_columns:
-                issues.append(f"new columns: {new_columns}")
+                issues.append(f'new columns: {new_columns}')
             if droppable:
-                issues.append(f"dropped columns: {droppable}")
+                issues.append(f'dropped columns: {droppable}')
             if type_changes:
-                issues.append(f"type changes: {type_changes}")
+                issues.append(f'type changes: {type_changes}')
             if issues:
                 raise ConfigError(
                     f"Schema mismatch on '{full_table}': {'; '.join(issues)}. "
@@ -351,74 +390,88 @@ class FileLoader(BaseLoader, variant='file'):
                 field = incoming_map[col_name]
                 try:
                     spark.sql(
-                        f"ALTER TABLE {full_table} ADD COLUMNS "
-                        f"({field.name} {field.dataType.simpleString()})"
+                        f'ALTER TABLE {full_table} ADD COLUMNS '
+                        f'({field.name} {field.dataType.simpleString()})'
                     )
-                    logger.info({
-                        'table': full_table,
-                        'schema_evolution': 'add_column',
-                        'column': field.name,
-                        'type': field.dataType.simpleString(),
-                    })
+                    logger.info(
+                        {
+                            'table': full_table,
+                            'schema_evolution': 'add_column',
+                            'column': field.name,
+                            'type': field.dataType.simpleString(),
+                        }
+                    )
                 except Exception:
-                    logger.warning({
-                        'table': full_table,
-                        'schema_evolution': 'add_column_skipped',
-                        'column': field.name,
-                        'reason': 'ALTER TABLE failed, Iceberg SQL extensions may be incompatible',
-                    })
+                    logger.warning(
+                        {
+                            'table': full_table,
+                            'schema_evolution': 'add_column_skipped',
+                            'column': field.name,
+                            'reason': 'ALTER TABLE failed, Iceberg SQL extensions may be incompatible',
+                        }
+                    )
 
         # Widen types where safe
         for col_name, (old_type, new_type) in type_changes.items():
             if self._is_safe_promotion(old_type, new_type):
                 try:
                     spark.sql(
-                        f"ALTER TABLE {full_table} ALTER COLUMN "
-                        f"{col_name} TYPE {new_type}"
+                        f'ALTER TABLE {full_table} ALTER COLUMN '
+                        f'{col_name} TYPE {new_type}'
                     )
-                    logger.info({
-                        'table': full_table,
-                        'schema_evolution': 'type_widen',
-                        'column': col_name,
-                        'old_type': old_type,
-                        'new_type': new_type,
-                    })
+                    logger.info(
+                        {
+                            'table': full_table,
+                            'schema_evolution': 'type_widen',
+                            'column': col_name,
+                            'old_type': old_type,
+                            'new_type': new_type,
+                        }
+                    )
                 except Exception:
-                    logger.warning({
+                    logger.warning(
+                        {
+                            'table': full_table,
+                            'schema_evolution': 'type_widen_skipped',
+                            'column': col_name,
+                            'old_type': old_type,
+                            'new_type': new_type,
+                            'reason': 'type change not supported by catalog',
+                        }
+                    )
+            else:
+                logger.warning(
+                    {
                         'table': full_table,
-                        'schema_evolution': 'type_widen_skipped',
+                        'schema_evolution': 'type_change_incompatible',
                         'column': col_name,
                         'old_type': old_type,
                         'new_type': new_type,
-                        'reason': 'type change not supported by catalog',
-                    })
-            else:
-                logger.warning({
-                    'table': full_table,
-                    'schema_evolution': 'type_change_incompatible',
-                    'column': col_name,
-                    'old_type': old_type,
-                    'new_type': new_type,
-                    'reason': 'not a safe promotion, column cast may be needed',
-                })
+                        'reason': 'not a safe promotion, column cast may be needed',
+                    }
+                )
 
         # Drop removed columns (only non-protected)
         if droppable and mode == 'merge':
             for col_name in droppable:
                 try:
-                    spark.sql(f"ALTER TABLE {full_table} DROP COLUMN {col_name}")
-                    logger.info({
-                        'table': full_table,
-                        'schema_evolution': 'drop_column',
-                        'column': col_name,
-                    })
+                    spark.sql(f'ALTER TABLE {full_table} DROP COLUMN {col_name}')
+                    logger.info(
+                        {
+                            'table': full_table,
+                            'schema_evolution': 'drop_column',
+                            'column': col_name,
+                        }
+                    )
                 except Exception:
-                    logger.warning({
-                        'table': full_table,
-                        'schema_evolution': 'drop_column_skipped',
-                        'column': col_name,
-                        'reason': 'column drop not supported or failed',
-                    })
+                    logger.warning(
+                        {
+                            'table': full_table,
+                            'schema_evolution': 'drop_column_skipped',
+                            'column': col_name,
+                            'reason': 'column drop not supported or failed',
+                        }
+                    )
 
     @staticmethod
     def _align_df_to_table(spark, df, full_table: str):
@@ -430,6 +483,7 @@ class FileLoader(BaseLoader, variant='file'):
         This ensures append never fails due to column order/count mismatch.
         """
         from pyspark.sql.functions import lit
+
         table_schema = spark.table(full_table).schema
         table_col_names = [f.name.lower() for f in table_schema.fields]
         df_col_names = {f.name.lower(): f.name for f in df.schema.fields}
@@ -438,30 +492,40 @@ class FileLoader(BaseLoader, variant='file'):
         for tf in table_schema.fields:
             col_lower = tf.name.lower()
             if col_lower in df_col_names:
-                select_cols.append(df[df_col_names[col_lower]].cast(tf.dataType).alias(tf.name))
+                select_cols.append(
+                    df[df_col_names[col_lower]].cast(tf.dataType).alias(tf.name)
+                )
             else:
                 select_cols.append(lit(None).cast(tf.dataType).alias(tf.name))
 
         return df.select(*select_cols)
 
-    def _apply_iceberg_sort_order(self, spark, full_table: str, sort_by: list[str]) -> None:
+    def _apply_iceberg_sort_order(
+        self, spark, full_table: str, sort_by: list[str]
+    ) -> None:
         """Set write sort order on an Iceberg table via ALTER TABLE."""
         sort_spec = ', '.join(s.strip() for s in sort_by)
         try:
-            spark.sql(f"ALTER TABLE {full_table} WRITE ORDERED BY {sort_spec}")
-            logger.info({
-                'table': full_table,
-                'iceberg_sort_order': sort_spec,
-            })
+            spark.sql(f'ALTER TABLE {full_table} WRITE ORDERED BY {sort_spec}')
+            logger.info(
+                {
+                    'table': full_table,
+                    'iceberg_sort_order': sort_spec,
+                }
+            )
         except Exception as e:
-            logger.warning({
-                'table': full_table,
-                'iceberg_sort_order_skipped': sort_spec,
-                'reason': str(e)[:200],
-                'hint': 'Iceberg SQL extensions may be incompatible with your Spark version',
-            })
+            logger.warning(
+                {
+                    'table': full_table,
+                    'iceberg_sort_order_skipped': sort_spec,
+                    'reason': str(e)[:200],
+                    'hint': 'Iceberg SQL extensions may be incompatible with your Spark version',
+                }
+            )
 
-    def _write_iceberg(self, spark, df, full_table: str, write_mode: str, table: TableConfig) -> None:
+    def _write_iceberg(
+        self, spark, df, full_table: str, write_mode: str, table: TableConfig
+    ) -> None:
         """Write DataFrame to an Iceberg table with partition, properties, sort order, and schema evolution."""
         partition_by = table.iceberg_partition_by
         sort_by = table.iceberg_sort_by
@@ -487,11 +551,28 @@ class FileLoader(BaseLoader, variant='file'):
                 protected_extra.add(s.strip().lower())
 
         if table_exists and schema_evolution != 'replace':
-            self._evolve_iceberg_schema(spark, full_table, df, schema_evolution,
-                                         protected_extra=protected_extra)
+            self._evolve_iceberg_schema(
+                spark, full_table, df, schema_evolution, protected_extra=protected_extra
+            )
 
             if sort_by:
                 self._apply_iceberg_sort_order(spark, full_table, sort_by)
+
+            # Apply table properties to existing table via ALTER TABLE
+            if properties:
+                for key, value in properties.items():
+                    try:
+                        spark.sql(
+                            f"ALTER TABLE {full_table} SET TBLPROPERTIES ('{key}' = '{value}')"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            {
+                                'table': full_table,
+                                'iceberg_property_skipped': f'{key}={value}',
+                                'reason': str(e)[:200],
+                            }
+                        )
 
             # Align DataFrame columns to table schema (order, types, missing cols as NULL)
             df = self._align_df_to_table(spark, df, full_table)
@@ -507,7 +588,9 @@ class FileLoader(BaseLoader, variant='file'):
             writer = df.writeTo(full_table).using('iceberg')
 
             if partition_by:
-                partition_cols = [self._parse_partition_transform(p) for p in partition_by]
+                partition_cols = [
+                    self._parse_partition_transform(p) for p in partition_by
+                ]
                 writer = writer.partitionedBy(*partition_cols)
 
             for key, value in properties.items():
@@ -521,11 +604,13 @@ class FileLoader(BaseLoader, variant='file'):
             if sort_by:
                 self._apply_iceberg_sort_order(spark, full_table, sort_by)
 
-    def _delta_table_exists(self, spark, full_table: str | None, path: str | None) -> bool:
+    def _delta_table_exists(
+        self, spark, full_table: str | None, path: str | None
+    ) -> bool:
         """Check if a Delta table already exists."""
         try:
             if full_table:
-                spark.sql(f"DESCRIBE TABLE {full_table}")
+                spark.sql(f'DESCRIBE TABLE {full_table}')
             elif path:
                 spark.read.format('delta').load(path).limit(0)
             else:
@@ -534,8 +619,15 @@ class FileLoader(BaseLoader, variant='file'):
         except Exception:
             return False
 
-    def _write_delta(self, spark, df, target_name: str, path: str,
-                     write_mode: str, table: TableConfig) -> None:
+    def _write_delta(
+        self,
+        spark,
+        df,
+        target_name: str,
+        path: str,
+        write_mode: str,
+        table: TableConfig,
+    ) -> None:
         """Write DataFrame to a Delta table with partition, z-order, properties, and schema evolution."""
         partition_by = table.delta_partition_by
         z_order_by = table.delta_z_order_by
@@ -593,7 +685,9 @@ class FileLoader(BaseLoader, variant='file'):
         if full_table and properties and table_exists:
             for key, value in properties.items():
                 try:
-                    spark.sql(f"ALTER TABLE {full_table} SET TBLPROPERTIES ('{key}' = '{value}')")
+                    spark.sql(
+                        f"ALTER TABLE {full_table} SET TBLPROPERTIES ('{key}' = '{value}')"
+                    )
                 except Exception:
                     pass
 
@@ -601,17 +695,21 @@ class FileLoader(BaseLoader, variant='file'):
         if z_order_by and full_table:
             z_cols = ', '.join(z_order_by)
             try:
-                spark.sql(f"OPTIMIZE {full_table} ZORDER BY ({z_cols})")
-                logger.info({
-                    'table': full_table or path,
-                    'delta_z_order': z_cols,
-                })
+                spark.sql(f'OPTIMIZE {full_table} ZORDER BY ({z_cols})')
+                logger.info(
+                    {
+                        'table': full_table or path,
+                        'delta_z_order': z_cols,
+                    }
+                )
             except Exception:
-                logger.warning({
-                    'table': full_table or path,
-                    'delta_z_order_skipped': z_cols,
-                    'reason': 'OPTIMIZE ZORDER requires Delta catalog table',
-                })
+                logger.warning(
+                    {
+                        'table': full_table or path,
+                        'delta_z_order_skipped': z_cols,
+                        'reason': 'OPTIMIZE ZORDER requires Delta catalog table',
+                    }
+                )
 
     def load(self, table: TableConfig, data: ExtractResult, spark) -> None:
         target_name = table.target_name
@@ -619,7 +717,9 @@ class FileLoader(BaseLoader, variant='file'):
         df = data.df
 
         if df is None:
-            logger.info({'table': target_name, 'status': 'skipped', 'reason': 'no data'})
+            logger.info(
+                {'table': target_name, 'status': 'skipped', 'reason': 'no data'}
+            )
             return
 
         df = add_etl_columns(df, datetime.now(), dedup_columns=table.dedup_columns)
@@ -627,14 +727,16 @@ class FileLoader(BaseLoader, variant='file'):
         if table.write_partitions:
             df = df.coalesce(table.write_partitions)
 
-        logger.info({
-            'table': target_name,
-            'status': 'loading',
-            'storage': self.storage,
-            'format': self.format,
-            'write_mode': write_mode,
-            'catalog': self.catalog,
-        })
+        logger.info(
+            {
+                'table': target_name,
+                'status': 'loading',
+                'storage': self.storage,
+                'format': self.format,
+                'write_mode': write_mode,
+                'catalog': self.catalog,
+            }
+        )
 
         self._configure_storage(spark)
         path = self._resolve_path(target_name)
