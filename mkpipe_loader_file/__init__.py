@@ -557,6 +557,12 @@ class FileLoader(BaseLoader, variant='file'):
 
             if sort_by:
                 self._apply_iceberg_sort_order(spark, full_table, sort_by)
+            else:
+                # Remove existing sort order to prevent unwanted pre-sort overhead
+                try:
+                    spark.sql(f'ALTER TABLE {full_table} WRITE UNORDERED')
+                except Exception:
+                    pass
 
             # Apply table properties to existing table via ALTER TABLE
             if properties:
