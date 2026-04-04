@@ -87,6 +87,7 @@ For catalog-based formats (`iceberg` with `catalog`), the path is ignored — th
 | `dedup_columns` | list | `null` | Columns used to generate `mkpipe_id` (xxhash64) for deduplication |
 | `write_partitions` | int | `null` | Coalesce DataFrame to N partitions before writing (`df.coalesce(N)`) |
 | `batchsize` | int | `10000` | Batch size hint (used by some downstream connectors) |
+| `write_strategy` | str | `null` | `append` or `replace` (upsert/merge not supported) |
 | `tags` | list | `[]` | Tags for selective pipeline execution (`mkpipe run --tags ...`) |
 | `iceberg_partition_by` | list | `null` | Iceberg partition spec. Supports transforms: `year(col)`, `month(col)`, `day(col)`, `hour(col)`, `bucket(N, col)`, `truncate(N, col)`, or plain column names |
 | `iceberg_sort_by` | list | `null` | Write sort order columns. Improves query performance on filtered/joined columns. Applied via `ALTER TABLE ... WRITE ORDERED BY` |
@@ -435,21 +436,29 @@ pipelines:
 | `delta.deletedFileRetentionDuration` | How long to keep deleted data files (default: 7 days) |
 | `delta.dataSkippingNumIndexedCols` | Number of columns to collect stats for (default: 32) |
 
-## Write Modes
+## Write Strategy
 
-Write mode is determined automatically by the extractor and passed to the loader:
+Control how data is written to file targets:
 
-| Mode | Trigger | Behavior |
-|------|---------|----------|
-| `overwrite` | Full load (first run or `replication_method: full`) | Replaces all existing data at the path/table |
-| `append` | Incremental load (subsequent runs) | Adds new rows without touching existing data |
+```yaml
+      - name: public.events
+        target_name: events
+        write_strategy: append       # append | replace
+```
+
+| Strategy | Behavior |
+|---|---|
+| `append` | Add new rows without touching existing data (default for incremental) |
+| `replace` | Overwrite all existing data at the path/table (default for full) |
+
+> **Note:** File loader does not support `upsert` or `merge` strategies. For Iceberg/Delta tables that need merge semantics, consider using a SQL-based loader or a post-load transformation.
 
 For catalog-based Iceberg/Delta tables:
-- `overwrite` → `writeTo(...).createOrReplace()` — creates table if not exists
+- `replace` → `writeTo(...).createOrReplace()` — creates table if not exists
 - `append` → `writeTo(...).append()`
 
 For path-based formats:
-- `overwrite` / `append` → passed directly to `df.write.mode(...)`
+- `replace` / `append` → passed directly to `df.write.mode(...)`
 
 ## Performance
 

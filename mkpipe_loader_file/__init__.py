@@ -1,10 +1,11 @@
 import gc
 from datetime import datetime
 
-from mkpipe.exceptions import ConfigError
+from mkpipe.exceptions import ConfigError, LoadError
+from mkpipe.models import ConnectionConfig, ExtractResult, TableConfig, WriteStrategy
 from mkpipe.spark.base import BaseLoader
 from mkpipe.spark.columns import add_etl_columns
-from mkpipe.models import ConnectionConfig, ExtractResult, TableConfig
+from mkpipe.strategy import resolve_write_strategy
 from mkpipe.utils import get_logger
 
 JAR_PACKAGES = [
@@ -719,7 +720,6 @@ class FileLoader(BaseLoader, variant='file'):
 
     def load(self, table: TableConfig, data: ExtractResult, spark) -> None:
         target_name = table.target_name
-        write_mode = data.write_mode
         df = data.df
 
         if df is None:
@@ -733,34 +733,53 @@ class FileLoader(BaseLoader, variant='file'):
         if table.write_partitions:
             df = df.coalesce(table.write_partitions)
 
+        strategy = resolve_write_strategy(table, data)
+
+        # Map strategy to Spark write_mode
+        match strategy:
+            case WriteStrategy.APPEND:
+                write_mode = 'append'
+            case WriteStrategy.REPLACE:
+                write_mode = 'overwrite'
+            case _:
+                raise ConfigError(
+                    f"File loader does not support write_strategy: {strategy.value}. "
+                    f"Supported: append, replace"
+                )
+
         logger.info(
             {
                 'table': target_name,
                 'status': 'loading',
                 'storage': self.storage,
                 'format': self.format,
-                'write_mode': write_mode,
+                'write_strategy': strategy.value,
                 'catalog': self.catalog,
             }
         )
 
-        self._configure_storage(spark)
-        path = self._resolve_path(target_name)
+        try:
+            self._configure_storage(spark)
+            path = self._resolve_path(target_name)
 
-        if self.format == 'iceberg':
-            if self.catalog:
-                self._configure_catalog(spark)
-            full_table = f'{self.catalog_name}.{self.catalog_database}.{target_name}'
-            self._write_iceberg(spark, df, full_table, write_mode, table)
-        elif self.format == 'delta':
-            if self.catalog:
-                self._configure_delta_catalog(spark)
-            self._write_delta(spark, df, target_name, path, write_mode, table)
-        else:
-            writer = df.write.format(self.format).mode(write_mode)
-            if self.format == 'csv':
-                writer = writer.option('header', 'true')
-            writer.save(path)
+            if self.format == 'iceberg':
+                if self.catalog:
+                    self._configure_catalog(spark)
+                full_table = f'{self.catalog_name}.{self.catalog_database}.{target_name}'
+                self._write_iceberg(spark, df, full_table, write_mode, table)
+            elif self.format == 'delta':
+                if self.catalog:
+                    self._configure_delta_catalog(spark)
+                self._write_delta(spark, df, target_name, path, write_mode, table)
+            else:
+                writer = df.write.format(self.format).mode(write_mode)
+                if self.format == 'csv':
+                    writer = writer.option('header', 'true')
+                writer.save(path)
+        except (ConfigError, LoadError):
+            raise
+        except Exception as e:
+            raise LoadError(f"Failed to write '{target_name}': {e}") from e
 
         df.unpersist()
         gc.collect()
