@@ -481,25 +481,57 @@ class FileLoader(BaseLoader, variant='file'):
         - Reorder columns to match table order
         - Add missing columns as NULL (columns that exist in table but not in df)
         - Drop extra columns not in table schema
+        - For complex types (struct/array) where cast fails due to nested
+          schema differences, keep the column as-is and let Iceberg's
+          merge-schema handle the evolution.
         This ensures append never fails due to column order/count mismatch.
         """
         from pyspark.sql.functions import lit
+        from pyspark.sql.types import ArrayType, MapType, StructType
 
         table_schema = spark.table(full_table).schema
         table_col_names = [f.name.lower() for f in table_schema.fields]
         df_col_names = {f.name.lower(): f.name for f in df.schema.fields}
 
         select_cols = []
+        needs_merge_schema = False
         for tf in table_schema.fields:
             col_lower = tf.name.lower()
             if col_lower in df_col_names:
-                select_cols.append(
-                    df[df_col_names[col_lower]].cast(tf.dataType).alias(tf.name)
-                )
+                src_col = df[df_col_names[col_lower]]
+                src_type = df.schema[df_col_names[col_lower]].dataType
+                tgt_type = tf.dataType
+                is_complex = isinstance(tgt_type, (ArrayType, StructType, MapType))
+
+                if src_type.simpleString() == tgt_type.simpleString():
+                    select_cols.append(src_col.alias(tf.name))
+                elif is_complex:
+                    # Nested schema differs (e.g. new field in struct).
+                    # Keep as-is; Iceberg merge-schema will reconcile.
+                    select_cols.append(src_col.alias(tf.name))
+                    needs_merge_schema = True
+                    logger.info({
+                        'table': full_table,
+                        'schema_align': 'skip_cast_complex',
+                        'column': tf.name,
+                        'table_type': tgt_type.simpleString()[:120],
+                        'incoming_type': src_type.simpleString()[:120],
+                    })
+                else:
+                    select_cols.append(src_col.cast(tgt_type).alias(tf.name))
             else:
                 select_cols.append(lit(None).cast(tf.dataType).alias(tf.name))
 
-        return df.select(*select_cols)
+        # Include new columns from df that are not in the table schema
+        for field in df.schema.fields:
+            if field.name.lower() not in set(table_col_names):
+                select_cols.append(df[field.name])
+                needs_merge_schema = True
+
+        aligned = df.select(*select_cols)
+        # Tag the result so _write_iceberg knows merge-schema is needed
+        aligned._mkpipe_needs_merge_schema = needs_merge_schema
+        return aligned
 
     def _apply_iceberg_sort_order(
         self, spark, full_table: str, sort_by: list[str]
@@ -584,13 +616,23 @@ class FileLoader(BaseLoader, variant='file'):
             # Align DataFrame columns to table schema (order, types, missing cols as NULL)
             df = self._align_df_to_table(spark, df, full_table)
 
+            use_merge = getattr(df, '_mkpipe_needs_merge_schema', False)
+            if use_merge:
+                spark.conf.set('spark.sql.iceberg.handle-timestamp-without-timezone', 'true')
+
             if write_mode == 'overwrite':
                 if partition_by:
-                    df.writeTo(full_table).overwritePartitions()
+                    if use_merge:
+                        df.writeTo(full_table).option('merge-schema', 'true').overwritePartitions()
+                    else:
+                        df.writeTo(full_table).overwritePartitions()
                 else:
                     df.writeTo(full_table).using('iceberg').createOrReplace()
             else:
-                df.writeTo(full_table).append()
+                if use_merge:
+                    df.writeTo(full_table).option('merge-schema', 'true').append()
+                else:
+                    df.writeTo(full_table).append()
         else:
             writer = df.writeTo(full_table).using('iceberg')
 
