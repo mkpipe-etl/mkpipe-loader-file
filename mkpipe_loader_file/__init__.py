@@ -306,7 +306,14 @@ class FileLoader(BaseLoader, variant='file'):
 
     @staticmethod
     def _is_safe_promotion(old_type: str, new_type: str) -> bool:
-        """Check if type change is a safe Iceberg promotion."""
+        """Check if type change is a safe Iceberg type promotion.
+
+        Only returns True for promotions that Iceberg natively supports via
+        ALTER TABLE ... ALTER COLUMN ... TYPE:
+          - int -> bigint
+          - float -> double
+          - decimal(P,S) -> decimal(P',S') with P' >= P and S' >= S
+        """
         old_t = old_type.lower().strip()
         new_t = new_type.lower().strip()
         if old_t == new_t:
@@ -319,9 +326,6 @@ class FileLoader(BaseLoader, variant='file'):
             return True
         # decimal widening (higher precision/scale)
         if old_t.startswith('decimal') and new_t.startswith('decimal'):
-            return True
-        # string accepts anything
-        if new_t == 'string':
             return True
         return False
 
@@ -441,16 +445,51 @@ class FileLoader(BaseLoader, variant='file'):
                         }
                     )
             else:
-                logger.warning(
-                    {
-                        'table': full_table,
-                        'schema_evolution': 'type_change_incompatible',
-                        'column': col_name,
-                        'old_type': old_type,
-                        'new_type': new_type,
-                        'reason': 'not a safe promotion, column cast may be needed',
-                    }
-                )
+                # Incompatible type change (e.g. DECIMAL -> STRING).
+                # Drop the column and re-add with the new type so the
+                # pipeline can continue.  Existing data in this column
+                # becomes NULL — acceptable because it was likely all-NULL
+                # when the wrong type was originally inferred.
+                if col_name.lower() not in protected:
+                    try:
+                        spark.sql(
+                            f'ALTER TABLE {full_table} DROP COLUMN {col_name}'
+                        )
+                        spark.sql(
+                            f'ALTER TABLE {full_table} ADD COLUMNS '
+                            f'({col_name} {new_type})'
+                        )
+                        logger.info(
+                            {
+                                'table': full_table,
+                                'schema_evolution': 'type_change_recreate',
+                                'column': col_name,
+                                'old_type': old_type,
+                                'new_type': new_type,
+                            }
+                        )
+                    except Exception:
+                        logger.warning(
+                            {
+                                'table': full_table,
+                                'schema_evolution': 'type_change_recreate_failed',
+                                'column': col_name,
+                                'old_type': old_type,
+                                'new_type': new_type,
+                                'reason': 'drop+add failed, manual intervention required',
+                            }
+                        )
+                else:
+                    logger.warning(
+                        {
+                            'table': full_table,
+                            'schema_evolution': 'type_change_incompatible',
+                            'column': col_name,
+                            'old_type': old_type,
+                            'new_type': new_type,
+                            'reason': 'protected column, cannot drop+recreate',
+                        }
+                    )
 
         # Drop removed columns (only non-protected)
         if droppable and mode == 'merge':
@@ -484,10 +523,21 @@ class FileLoader(BaseLoader, variant='file'):
         - For complex types (struct/array) where cast fails due to nested
           schema differences, keep the column as-is and let Iceberg's
           merge-schema handle the evolution.
+        - For incompatible primitive type changes where schema evolution
+          could not resolve the mismatch (e.g. DECIMAL -> STRING), keep
+          the source type and delegate to merge-schema.
         This ensures append never fails due to column order/count mismatch.
         """
         from pyspark.sql.functions import lit
-        from pyspark.sql.types import ArrayType, MapType, StructType
+        from pyspark.sql.types import (
+            ArrayType, ByteType, DecimalType, DoubleType, FloatType,
+            IntegerType, LongType, MapType, ShortType, StringType, StructType,
+        )
+
+        _NUMERIC_TYPES = (
+            ByteType, ShortType, IntegerType, LongType,
+            FloatType, DoubleType, DecimalType,
+        )
 
         table_schema = spark.table(full_table).schema
         table_col_names = [f.name.lower() for f in table_schema.fields]
@@ -513,6 +563,19 @@ class FileLoader(BaseLoader, variant='file'):
                     logger.info({
                         'table': full_table,
                         'schema_align': 'skip_cast_complex',
+                        'column': tf.name,
+                        'table_type': tgt_type.simpleString()[:120],
+                        'incoming_type': src_type.simpleString()[:120],
+                    })
+                elif (isinstance(src_type, StringType) and isinstance(tgt_type, _NUMERIC_TYPES)):
+                    # STRING -> NUMERIC cast is unsafe (source may contain
+                    # non-numeric data).  Keep source type and let
+                    # merge-schema handle it as a fallback.
+                    select_cols.append(src_col.alias(tf.name))
+                    needs_merge_schema = True
+                    logger.warning({
+                        'table': full_table,
+                        'schema_align': 'skip_cast_incompatible',
                         'column': tf.name,
                         'table_type': tgt_type.simpleString()[:120],
                         'incoming_type': src_type.simpleString()[:120],
