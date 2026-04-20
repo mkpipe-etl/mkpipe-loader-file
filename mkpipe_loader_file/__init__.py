@@ -302,7 +302,7 @@ class FileLoader(BaseLoader, variant='file'):
         ('decimal(10,0)', 'decimal(20,0)'),  # example; checked via startswith below
     }
 
-    _PROTECTED_COLUMNS = {'etl_time', 'mkpipe_id'}
+    _PROTECTED_COLUMNS = {'mkpipe_id'}
 
     @staticmethod
     def _is_safe_promotion(old_type: str, new_type: str) -> bool:
@@ -360,7 +360,7 @@ class FileLoader(BaseLoader, variant='file'):
         dropped_columns = existing_names - incoming_names
 
         # Build protected set: metadata + partition + sort columns
-        protected = {c.lower() for c in self._PROTECTED_COLUMNS}
+        protected = {c.lower() for c in self._PROTECTED_COLUMNS} | {self.ingested_at_column.lower()}
         if protected_extra:
             protected |= {c.lower() for c in protected_extra}
 
@@ -833,7 +833,7 @@ class FileLoader(BaseLoader, variant='file'):
             )
             return
 
-        df = add_etl_columns(df, datetime.now(), dedup_columns=table.dedup_columns)
+        df = add_etl_columns(df, datetime.now(), dedup_columns=table.dedup_columns, ingested_at_column=self.ingested_at_column)
 
         if table.write_partitions:
             df = df.coalesce(table.write_partitions)

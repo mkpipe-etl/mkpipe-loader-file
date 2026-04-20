@@ -104,7 +104,7 @@ The loader automatically appends two columns to every written dataset:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `etl_time` | timestamp | Timestamp when the load was executed |
+| `_ingested_at` | timestamp | Timestamp when the load was executed (configurable via `settings.ingested_at_column`) |
 | `mkpipe_id` | bigint | xxhash64 of `dedup_columns` values — used for downstream deduplication |
 
 `mkpipe_id` is only populated when `dedup_columns` is configured.
