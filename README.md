@@ -105,9 +105,9 @@ The loader automatically appends two columns to every written dataset:
 | Column | Type | Description |
 |--------|------|-------------|
 | `_ingested_at` | timestamp | Timestamp when the load was executed (configurable via `settings.ingested_at_column`) |
-| `mkpipe_id` | bigint | xxhash64 of `dedup_columns` values — used for downstream deduplication |
+| `mkpipe_id` | bigint | xxhash64 of `dedup_columns` values — used for downstream deduplication (configurable via `settings.ingestion_id_column`) |
 
-`mkpipe_id` is only populated when `dedup_columns` is configured.
+The dedup ID column is only populated when `dedup_columns` is configured.
 
 ## YAML Examples
 
