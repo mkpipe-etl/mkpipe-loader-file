@@ -449,7 +449,7 @@ Control how data is written to file targets:
 | Strategy | Behavior |
 |---|---|
 | `append` | Add new rows without touching existing data (default for incremental) |
-| `replace` | Overwrite all existing data at the path/table (default for full) |
+| `replace` | Overwrite all existing data at the path/table (default for full). Use `if_exists: append` to preserve existing data |
 
 > **Note:** File loader does not support `upsert` or `merge` strategies. For Iceberg/Delta tables that need merge semantics, consider using a SQL-based loader or a post-load transformation.
 

@@ -851,7 +851,7 @@ class FileLoader(BaseLoader, variant='file'):
             case WriteStrategy.APPEND:
                 write_mode = 'append'
             case WriteStrategy.REPLACE:
-                write_mode = 'overwrite'
+                write_mode = 'append' if self.if_exists == 'append' else 'overwrite'
             case _:
                 raise ConfigError(
                     f"File loader does not support write_strategy: {strategy.value}. "
