@@ -12,9 +12,9 @@ JAR_PACKAGES = [
     'org.apache.hadoop:hadoop-aws:3.4.1',
     'software.amazon.awssdk:bundle:2.29.52',
     'com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.25',
-    'org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.1',
-    'org.apache.iceberg:iceberg-aws-bundle:1.10.1',
-    'io.delta:delta-spark_2.13:4.0.1',
+    'org.apache.iceberg:iceberg-spark-runtime-4.1_2.13:1.11.0',
+    'org.apache.iceberg:iceberg-aws-bundle:1.11.0',
+    'io.delta:delta-spark_2.13:4.1.0',
 ]
 
 logger = get_logger(__name__)
